@@ -39,10 +39,24 @@ def handler(job):
         if file_size == 0:
              raise ValueError("Downloaded file is empty")
 
+        # 2.5 Convert to MP3 (Fix for WebM issues)
+        mp3_path = local_audio_path.replace(".webm", ".mp3")
+        print("Converting to MP3...")
+        import subprocess
+        subprocess.run([
+            "ffmpeg", "-i", local_audio_path, 
+            "-vn", # Disable video
+            "-acodec", "libmp3lame", 
+            "-y", 
+            mp3_path
+        ], check=True)
+        
+        mp3_size = os.path.getsize(mp3_path)
+        print(f"Converted to MP3: {mp3_path}, size: {mp3_size} bytes")
+
         # 3. Upload to Gemini
         print("Uploading to Gemini...")
-        # Explicitly specify mime_type for stability
-        video_file = genai.upload_file(path=local_audio_path, mime_type="audio/webm")
+        video_file = genai.upload_file(path=mp3_path, mime_type="audio/mp3")
         
         # Wait for processing
         import time
