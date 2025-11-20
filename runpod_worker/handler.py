@@ -33,11 +33,16 @@ def handler(job):
         
         # 2. Download Audio
         local_audio_path = download_file(audio_url)
-        print(f"Downloaded to {local_audio_path}")
+        file_size = os.path.getsize(local_audio_path)
+        print(f"Downloaded to {local_audio_path}, size: {file_size} bytes")
+
+        if file_size == 0:
+             raise ValueError("Downloaded file is empty")
 
         # 3. Upload to Gemini
         print("Uploading to Gemini...")
-        video_file = genai.upload_file(path=local_audio_path)
+        # Explicitly specify mime_type for stability
+        video_file = genai.upload_file(path=local_audio_path, mime_type="audio/webm")
         
         # Wait for processing
         import time
@@ -52,7 +57,8 @@ def handler(job):
         print(f"\nFile processed: {video_file.uri}")
 
         # 4. Generate Content
-        model = genai.GenerativeModel(model_name="gemini-1.5-flash")
+        # User confirmed gemini-2.5-flash
+        model = genai.GenerativeModel(model_name="gemini-2.5-flash")
         
         prompt = """
         You are an expert transcriptionist and summarizer. 
