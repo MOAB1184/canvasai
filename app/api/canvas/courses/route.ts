@@ -78,9 +78,15 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Canvas token and domain are required' }, { status: 400 });
     }
 
-    // Clean the token (remove any whitespace, newlines, quotes)
+    // Clean the token (remove any whitespace, newlines, quotes, and check for encoding issues)
     canvasToken = canvasToken.trim().replace(/[\r\n\t"']/g, '');
     console.log('[Canvas API] Cleaned token length:', canvasToken.length);
+    console.log('[Canvas API] Token character codes:', canvasToken.substring(0, 20).split('').map((c: string) => c.charCodeAt(0)).join(','));
+    
+    // Validate token format (Canvas tokens typically start with numbers and ~)
+    if (!/^[\d~]/.test(canvasToken)) {
+      console.warn('[Canvas API] Token format unusual - does not start with number or ~');
+    }
 
     // Clean the domain (remove https://, trailing slashes, www)
     let cleanDomain = canvasDomain.trim()
@@ -91,49 +97,79 @@ export async function POST(request: NextRequest) {
     console.log('[Canvas API] Cleaned domain:', cleanDomain);
 
     // Validate the token by making a test request
-    // Canvas supports both Bearer token and query parameter methods
+    // Canvas supports multiple authentication methods - try them all
     try {
       console.log('[Canvas] Testing connection to:', cleanDomain);
       console.log('[Canvas] Token (first 10 chars):', canvasToken.substring(0, 10));
+      console.log('[Canvas] Token (last 10 chars):', canvasToken.substring(canvasToken.length - 10));
       
-      // Try Bearer token method first (newer Canvas instances)
-      let testResp = await fetch(
+      let testResp: Response | null = null;
+      let authMethod = '';
+      
+      // Method 1: Bearer token (newer Canvas instances)
+      testResp = await fetch(
         `https://${cleanDomain}/api/v1/users/self`,
         { 
           headers: { 'Authorization': `Bearer ${canvasToken}` },
           signal: AbortSignal.timeout(10000)
         }
       );
-
-      console.log('[Canvas] Bearer method - status:', testResp.status);
-
-      // If Bearer fails, try query parameter method (older Canvas instances)
+      console.log('[Canvas] Method 1 (Bearer) - status:', testResp.status);
+      authMethod = 'Bearer';
+      
+      // Method 2: Token without Bearer prefix (some Canvas instances)
       if (!testResp.ok && testResp.status === 401) {
-        console.log('[Canvas] Bearer method failed, trying query parameter method...');
+        console.log('[Canvas] Bearer failed, trying token without prefix...');
+        testResp = await fetch(
+          `https://${cleanDomain}/api/v1/users/self`,
+          { 
+            headers: { 'Authorization': canvasToken },
+            signal: AbortSignal.timeout(10000)
+          }
+        );
+        console.log('[Canvas] Method 2 (Token only) - status:', testResp.status);
+        authMethod = 'Token only';
+      }
+      
+      // Method 3: Query parameter (older Canvas instances)
+      if (!testResp.ok && testResp.status === 401) {
+        console.log('[Canvas] Token header failed, trying query parameter...');
         testResp = await fetch(
           `https://${cleanDomain}/api/v1/users/self?access_token=${encodeURIComponent(canvasToken)}`,
           { 
             signal: AbortSignal.timeout(10000)
           }
         );
-        console.log('[Canvas] Query parameter method - status:', testResp.status);
+        console.log('[Canvas] Method 3 (Query param) - status:', testResp.status);
+        authMethod = 'Query parameter';
+      }
+      
+      if (!testResp) {
+        throw new Error('Failed to make test request');
       }
 
       console.log('[Canvas] Final response status:', testResp.status);
+      console.log('[Canvas] Successful auth method:', authMethod);
       console.log('[Canvas] Response headers:', Object.fromEntries(testResp.headers.entries()));
 
       if (!testResp.ok) {
         const errorText = await testResp.text();
-        console.error('[Canvas] Test failed:', errorText);
+        console.error('[Canvas] All auth methods failed');
+        console.error('[Canvas] Final error response:', errorText);
+        console.error('[Canvas] Response status:', testResp.status);
+        console.error('[Canvas] Response status text:', testResp.statusText);
         
         // Parse the error for a more helpful message
         let errorMessage = `Canvas returned status ${testResp.status}`;
+        let errorDetails: any = {};
         try {
           const errorJson = JSON.parse(errorText);
           if (errorJson.errors && errorJson.errors[0]?.message) {
             errorMessage = errorJson.errors[0].message;
+            errorDetails = errorJson.errors[0];
           } else if (errorJson.message) {
             errorMessage = errorJson.message;
+            errorDetails = errorJson;
           }
         } catch (e) {
           // Use raw error text if not JSON
@@ -142,19 +178,28 @@ export async function POST(request: NextRequest) {
           }
         }
         
+        // Check if token format looks valid (Canvas tokens usually start with numbers and ~)
+        const tokenFormatValid = /^[\d~]/.test(canvasToken);
+        
         return NextResponse.json({ 
           error: `Canvas connection failed: ${errorMessage}. Please verify your token is correct and not expired.`,
           details: {
             status: testResp.status,
+            statusText: testResp.statusText,
             domain: cleanDomain,
             tokenLength: canvasToken.length,
-            tokenPrefix: canvasToken.substring(0, 5)
+            tokenPrefix: canvasToken.substring(0, 5),
+            tokenSuffix: canvasToken.substring(canvasToken.length - 5),
+            tokenFormatValid,
+            methodsTried: ['Bearer', 'Token only', 'Query parameter'],
+            canvasError: errorDetails
           }
         }, { status: 400 });
       }
 
       const userData = await testResp.json();
-      console.log('[Canvas] Connected successfully as:', userData.name);
+      console.log('[Canvas] Connected successfully as:', userData.name || userData.id);
+      console.log('[Canvas] Using auth method:', authMethod);
     } catch (e: any) {
       console.error('[Canvas] Connection error:', e);
       return NextResponse.json({ 
@@ -212,12 +257,19 @@ export async function DELETE(request: NextRequest) {
 
 // Helper function to make Canvas API requests with fallback authentication
 async function canvasApiRequest(url: string, token: string): Promise<Response> {
-  // Try Bearer token method first
+  // Method 1: Try Bearer token first
   let resp = await fetch(url, {
     headers: { 'Authorization': `Bearer ${token}` }
   });
 
-  // If Bearer fails with 401, try query parameter method
+  // Method 2: If Bearer fails, try token without prefix
+  if (!resp.ok && resp.status === 401) {
+    resp = await fetch(url, {
+      headers: { 'Authorization': token }
+    });
+  }
+
+  // Method 3: If header methods fail, try query parameter
   if (!resp.ok && resp.status === 401) {
     const urlObj = new URL(url);
     urlObj.searchParams.set('access_token', token);
