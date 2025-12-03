@@ -107,6 +107,8 @@ export async function POST(request: NextRequest) {
       let authMethod = '';
       const testEndpoint = `/api/v1/courses?enrollment_state=active&per_page=1`;
       
+      const methodResults: any[] = [];
+      
       // Method 1: Bearer token (newer Canvas instances)
       testResp = await fetch(
         `https://${cleanDomain}${testEndpoint}`,
@@ -115,8 +117,10 @@ export async function POST(request: NextRequest) {
           signal: AbortSignal.timeout(10000)
         }
       );
-      console.log('[Canvas] Method 1 (Bearer) - status:', testResp.status);
-      authMethod = 'Bearer';
+      const method1Error = !testResp.ok ? await testResp.text().catch(() => '') : '';
+      methodResults.push({ method: 'Bearer', status: testResp.status, error: method1Error.substring(0, 200) });
+      console.log('[Canvas] Method 1 (Bearer) - status:', testResp.status, 'error:', method1Error.substring(0, 100));
+      if (testResp.ok) authMethod = 'Bearer';
       
       // Method 2: Token without Bearer prefix (some Canvas instances)
       if (!testResp.ok && (testResp.status === 401 || testResp.status === 403)) {
@@ -128,7 +132,9 @@ export async function POST(request: NextRequest) {
             signal: AbortSignal.timeout(10000)
           }
         );
-        console.log('[Canvas] Method 2 (Token only) - status:', testResp.status);
+        const method2Error = !testResp.ok ? await testResp.text().catch(() => '') : '';
+        methodResults.push({ method: 'Token only', status: testResp.status, error: method2Error.substring(0, 200) });
+        console.log('[Canvas] Method 2 (Token only) - status:', testResp.status, 'error:', method2Error.substring(0, 100));
         if (testResp.ok) authMethod = 'Token only';
       }
       
@@ -142,7 +148,9 @@ export async function POST(request: NextRequest) {
             signal: AbortSignal.timeout(10000)
           }
         );
-        console.log('[Canvas] Method 3 (Query param) - status:', testResp.status);
+        const method3Error = !testResp.ok ? await testResp.text().catch(() => '') : '';
+        methodResults.push({ method: 'Query parameter', status: testResp.status, error: method3Error.substring(0, 200) });
+        console.log('[Canvas] Method 3 (Query param) - status:', testResp.status, 'error:', method3Error.substring(0, 100));
         if (testResp.ok) authMethod = 'Query parameter';
       }
       
@@ -199,7 +207,7 @@ export async function POST(request: NextRequest) {
             tokenPrefix: canvasToken.substring(0, 5),
             tokenSuffix: canvasToken.substring(canvasToken.length - 5),
             tokenFormatValid,
-            methodsTried: ['Bearer', 'Token only', 'Query parameter'],
+            methodResults,
             canvasError: errorDetails
           }
         }, { status: 400 });
@@ -215,6 +223,10 @@ export async function POST(request: NextRequest) {
       }, { status: 400 });
     }
 
+    // If validation passed, store credentials and fetch courses
+    // If validation failed but we want to try anyway, we can skip validation
+    // For now, if we got here, validation passed or we're proceeding anyway
+    
     // Store the credentials with cleaned domain
     const db = await getDb();
     const usersCollection = db.collection('users');
@@ -223,8 +235,15 @@ export async function POST(request: NextRequest) {
       { $set: { canvasToken, canvasDomain: cleanDomain, canvasConnectedAt: Date.now() } }
     );
 
-    // Fetch courses
+    // Fetch courses using the working auth method (if we found one)
+    // If no method worked, try fetching anyway - maybe validation endpoint is different
+    console.log('[Canvas] Attempting to fetch courses with stored token...');
     const courses = await fetchCanvasCourses(canvasToken, cleanDomain);
+    
+    // If courses fetch also fails, the token is definitely invalid
+    if (courses.length === 0) {
+      console.warn('[Canvas] No courses fetched - token may be invalid or user has no courses');
+    }
 
     return NextResponse.json({ 
       success: true,
