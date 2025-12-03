@@ -186,15 +186,31 @@ export async function POST(request: NextRequest) {
   }
 }
 
+// Helper function to make Canvas API requests with fallback authentication
+async function canvasApiRequest(url: string, token: string): Promise<Response> {
+  // Try Bearer token method first
+  let resp = await fetch(url, {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+
+  // If Bearer fails with 401, try query parameter method
+  if (!resp.ok && resp.status === 401) {
+    const urlObj = new URL(url);
+    urlObj.searchParams.set('access_token', token);
+    resp = await fetch(urlObj.toString());
+  }
+
+  return resp;
+}
+
 async function fetchCanvasAssignments(token: string, domain: string): Promise<CanvasAssignment[]> {
-  const headers = { 'Authorization': `Bearer ${token}` };
   const assignments: CanvasAssignment[] = [];
 
   try {
     // First get courses
-    const coursesResp = await fetch(
+    const coursesResp = await canvasApiRequest(
       `https://${domain}/api/v1/courses?enrollment_state=active&per_page=20`,
-      { headers }
+      token
     );
     
     if (!coursesResp.ok) {
@@ -210,9 +226,9 @@ async function fetchCanvasAssignments(token: string, domain: string): Promise<Ca
     // Fetch assignments from each course
     for (const course of courses.slice(0, 10)) {
       try {
-        const assignResp = await fetch(
+        const assignResp = await canvasApiRequest(
           `https://${domain}/api/v1/courses/${course.id}/assignments?per_page=20&order_by=due_at&bucket=upcoming`,
-          { headers }
+          token
         );
 
         if (assignResp.ok) {

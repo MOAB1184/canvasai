@@ -91,21 +91,36 @@ export async function POST(request: NextRequest) {
     console.log('[Canvas API] Cleaned domain:', cleanDomain);
 
     // Validate the token by making a test request
+    // Canvas supports both Bearer token and query parameter methods
     try {
       console.log('[Canvas] Testing connection to:', cleanDomain);
-      const authHeader = `Bearer ${canvasToken}`;
-      console.log('[Canvas] Auth header length:', authHeader.length);
+      console.log('[Canvas] Token (first 10 chars):', canvasToken.substring(0, 10));
       
-      const testResp = await fetch(
+      // Try Bearer token method first (newer Canvas instances)
+      let testResp = await fetch(
         `https://${cleanDomain}/api/v1/users/self`,
         { 
-          headers: { 'Authorization': authHeader },
-          signal: AbortSignal.timeout(10000) // 10 second timeout
+          headers: { 'Authorization': `Bearer ${canvasToken}` },
+          signal: AbortSignal.timeout(10000)
         }
       );
 
-      console.log('[Canvas] Test response status:', testResp.status);
-      console.log('[Canvas] Test response headers:', Object.fromEntries(testResp.headers.entries()));
+      console.log('[Canvas] Bearer method - status:', testResp.status);
+
+      // If Bearer fails, try query parameter method (older Canvas instances)
+      if (!testResp.ok && testResp.status === 401) {
+        console.log('[Canvas] Bearer method failed, trying query parameter method...');
+        testResp = await fetch(
+          `https://${cleanDomain}/api/v1/users/self?access_token=${encodeURIComponent(canvasToken)}`,
+          { 
+            signal: AbortSignal.timeout(10000)
+          }
+        );
+        console.log('[Canvas] Query parameter method - status:', testResp.status);
+      }
+
+      console.log('[Canvas] Final response status:', testResp.status);
+      console.log('[Canvas] Response headers:', Object.fromEntries(testResp.headers.entries()));
 
       if (!testResp.ok) {
         const errorText = await testResp.text();
@@ -132,7 +147,8 @@ export async function POST(request: NextRequest) {
           details: {
             status: testResp.status,
             domain: cleanDomain,
-            tokenLength: canvasToken.length
+            tokenLength: canvasToken.length,
+            tokenPrefix: canvasToken.substring(0, 5)
           }
         }, { status: 400 });
       }
@@ -194,15 +210,31 @@ export async function DELETE(request: NextRequest) {
   }
 }
 
+// Helper function to make Canvas API requests with fallback authentication
+async function canvasApiRequest(url: string, token: string): Promise<Response> {
+  // Try Bearer token method first
+  let resp = await fetch(url, {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+
+  // If Bearer fails with 401, try query parameter method
+  if (!resp.ok && resp.status === 401) {
+    const urlObj = new URL(url);
+    urlObj.searchParams.set('access_token', token);
+    resp = await fetch(urlObj.toString());
+  }
+
+  return resp;
+}
+
 async function fetchCanvasCourses(token: string, domain: string): Promise<CanvasCourse[]> {
-  const headers = { 'Authorization': `Bearer ${token}` };
   const courses: CanvasCourse[] = [];
 
   try {
     // Fetch active courses with enrollments
-    const coursesResp = await fetch(
+    const coursesResp = await canvasApiRequest(
       `https://${domain}/api/v1/courses?enrollment_state=active&include[]=total_scores&include[]=current_grading_period_scores&include[]=term&per_page=20`,
-      { headers }
+      token
     );
 
     if (!coursesResp.ok) {
@@ -221,9 +253,9 @@ async function fetchCanvasCourses(token: string, domain: string): Promise<Canvas
       // Try to get instructor name
       let instructor = 'TBD';
       try {
-        const teachersResp = await fetch(
+        const teachersResp = await canvasApiRequest(
           `https://${domain}/api/v1/courses/${course.id}/users?enrollment_type[]=teacher&per_page=1`,
-          { headers }
+          token
         );
         if (teachersResp.ok) {
           const teachers = await teachersResp.json();
