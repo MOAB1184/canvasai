@@ -96,7 +96,7 @@ export async function POST(request: NextRequest) {
 
     console.log('[Canvas API] Cleaned domain:', cleanDomain);
 
-    // Validate the token by making a test request
+    // Validate the token by trying to fetch courses (more reliable than users/self endpoint)
     // Canvas supports multiple authentication methods - try them all
     try {
       console.log('[Canvas] Testing connection to:', cleanDomain);
@@ -105,10 +105,11 @@ export async function POST(request: NextRequest) {
       
       let testResp: Response | null = null;
       let authMethod = '';
+      const testEndpoint = `/api/v1/courses?enrollment_state=active&per_page=1`;
       
       // Method 1: Bearer token (newer Canvas instances)
       testResp = await fetch(
-        `https://${cleanDomain}/api/v1/users/self`,
+        `https://${cleanDomain}${testEndpoint}`,
         { 
           headers: { 'Authorization': `Bearer ${canvasToken}` },
           signal: AbortSignal.timeout(10000)
@@ -118,30 +119,31 @@ export async function POST(request: NextRequest) {
       authMethod = 'Bearer';
       
       // Method 2: Token without Bearer prefix (some Canvas instances)
-      if (!testResp.ok && testResp.status === 401) {
+      if (!testResp.ok && (testResp.status === 401 || testResp.status === 403)) {
         console.log('[Canvas] Bearer failed, trying token without prefix...');
         testResp = await fetch(
-          `https://${cleanDomain}/api/v1/users/self`,
+          `https://${cleanDomain}${testEndpoint}`,
           { 
             headers: { 'Authorization': canvasToken },
             signal: AbortSignal.timeout(10000)
           }
         );
         console.log('[Canvas] Method 2 (Token only) - status:', testResp.status);
-        authMethod = 'Token only';
+        if (testResp.ok) authMethod = 'Token only';
       }
       
       // Method 3: Query parameter (older Canvas instances)
-      if (!testResp.ok && testResp.status === 401) {
+      if (!testResp.ok && (testResp.status === 401 || testResp.status === 403)) {
         console.log('[Canvas] Token header failed, trying query parameter...');
+        const urlWithToken = `https://${cleanDomain}${testEndpoint}${testEndpoint.includes('?') ? '&' : '?'}access_token=${encodeURIComponent(canvasToken)}`;
         testResp = await fetch(
-          `https://${cleanDomain}/api/v1/users/self?access_token=${encodeURIComponent(canvasToken)}`,
+          urlWithToken,
           { 
             signal: AbortSignal.timeout(10000)
           }
         );
         console.log('[Canvas] Method 3 (Query param) - status:', testResp.status);
-        authMethod = 'Query parameter';
+        if (testResp.ok) authMethod = 'Query parameter';
       }
       
       if (!testResp) {
@@ -152,7 +154,13 @@ export async function POST(request: NextRequest) {
       console.log('[Canvas] Successful auth method:', authMethod);
       console.log('[Canvas] Response headers:', Object.fromEntries(testResp.headers.entries()));
 
-      if (!testResp.ok) {
+      // If we get 200 or 200 with empty array, auth is working
+      if (testResp.ok) {
+        const testData = await testResp.json();
+        console.log('[Canvas] Token validation successful!');
+        console.log('[Canvas] Using auth method:', authMethod);
+        // Don't need to log user data since we're just validating the token works
+      } else {
         const errorText = await testResp.text();
         console.error('[Canvas] All auth methods failed');
         console.error('[Canvas] Final error response:', errorText);
@@ -196,10 +204,6 @@ export async function POST(request: NextRequest) {
           }
         }, { status: 400 });
       }
-
-      const userData = await testResp.json();
-      console.log('[Canvas] Connected successfully as:', userData.name || userData.id);
-      console.log('[Canvas] Using auth method:', authMethod);
     } catch (e: any) {
       console.error('[Canvas] Connection error:', e);
       return NextResponse.json({ 
